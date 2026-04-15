@@ -1,28 +1,35 @@
-import { router } from 'expo-router';
-import {
-  sendEmailVerification,
-  signInWithEmailAndPassword,
-  signOut,
-} from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { router, useLocalSearchParams } from 'expo-router';
+import { signInWithEmailAndPassword } from 'firebase/auth';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   Text,
   TextInput,
-  TouchableOpacity,
-  View,
+  TouchableOpacity
 } from 'react-native';
 import { auth, db } from '../services/firebase';
 
 export default function LoginScreen() {
+  const { role } = useLocalSearchParams();
+
+  // 🔥 FIX: default patient + lowercase
+  const selectedRole = role ? String(role).toLowerCase() : 'patient';
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const getTitle = () => {
+    if (selectedRole === 'doctor') return 'Doctor Login';
+    if (selectedRole === 'admin') return 'Admin Login';
+    return 'Patient Login';
+  };
+
   const handleLogin = async () => {
-    if (!email.trim() || !password.trim()) {
+    if (!email || !password) {
       Alert.alert('Missing Fields', 'Please enter email and password');
       return;
     }
@@ -32,102 +39,88 @@ export default function LoginScreen() {
 
       const userCredential = await signInWithEmailAndPassword(
         auth,
-        email.trim().toLowerCase(),
+        email.trim(),
         password
       );
 
       const user = userCredential.user;
+      const userRef = doc(db, 'users', user.uid);
 
-      await user.reload();
+      let userDoc = await getDoc(userRef);
 
-      if (!user.emailVerified) {
-        Alert.alert(
-          'Email Not Verified',
-          'Please verify your email before logging in.',
-          [
-            {
-              text: 'Resend Verification',
-              onPress: async () => {
-                try {
-                  await sendEmailVerification(user);
-                  Alert.alert(
-                    'Verification Sent',
-                    'Verification email has been sent to your inbox.'
-                  );
-                } catch (error: any) {
-                  Alert.alert(
-                    'Error',
-                    error?.message || 'Could not send verification email.'
-                  );
-                }
-              },
-            },
-            {
-              text: 'OK',
-              style: 'cancel',
-            },
-          ]
-        );
-
-        await signOut(auth);
-        return;
-      }
-
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
-
+      // 🔥 Auto create user if not exists
       if (!userDoc.exists()) {
-        Alert.alert('Error', 'User profile not found');
-        await signOut(auth);
-        return;
+        await setDoc(userRef, {
+          name: selectedRole === 'admin' ? 'Admin' : 'User',
+          email: user.email,
+          role: selectedRole,
+          createdAt: new Date().toISOString(),
+        });
+
+        userDoc = await getDoc(userRef);
       }
 
       const userData = userDoc.data();
 
+      // 🔒 Role check
+      if (userData?.role !== selectedRole) {
+        Alert.alert(
+          'Access Denied',
+          `This account is not registered as ${selectedRole}.`
+        );
+        return;
+      }
+
       Alert.alert('Login Success', `Welcome ${userData.name}`);
 
+      // 🚀 Navigation
       if (userData.role === 'doctor') {
         router.replace('/doctor-dashboard');
+      } else if (userData.role === 'admin') {
+        router.replace('/admin-dashboard');
       } else {
         router.replace('/home');
       }
+
     } catch (error: any) {
-      let message = 'Login failed. Please try again.';
+      let msg = error?.message || 'Login failed';
 
       if (error?.code === 'auth/invalid-credential') {
-        message = 'Invalid email or password.';
+        msg = 'Invalid email or password';
       } else if (error?.code === 'auth/user-not-found') {
-        message = 'No account found with this email.';
+        msg = 'User not found';
       } else if (error?.code === 'auth/wrong-password') {
-        message = 'Incorrect password.';
-      } else if (error?.code === 'auth/invalid-email') {
-        message = 'Please enter a valid email address.';
+        msg = 'Wrong password';
+      } else if (error?.code === 'auth/network-request-failed') {
+        msg = 'Network issue. Check internet and try again.';
       }
 
-      Alert.alert('Login Failed', message);
+      Alert.alert('Login Failed', msg);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <View
+    <KeyboardAvoidingView
       style={{
         flex: 1,
         backgroundColor: '#f8fbff',
-        padding: 20,
         justifyContent: 'center',
+        padding: 20,
       }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <Text style={{ fontSize: 30, fontWeight: '800', marginBottom: 8 }}>
-        Welcome Back
+        {getTitle()}
       </Text>
 
       <Text style={{ color: '#64748b', marginBottom: 24 }}>
-        Login to continue to your OPD account
+        Login to continue
       </Text>
 
       <TextInput
-        placeholder="Registered Email"
+        placeholder="Email"
         value={email}
         onChangeText={setEmail}
         autoCapitalize="none"
@@ -167,23 +160,22 @@ export default function LoginScreen() {
           alignItems: 'center',
         }}
       >
-        {loading ? (
-          <ActivityIndicator color="white" />
-        ) : (
-          <Text style={{ color: 'white', fontWeight: '700', fontSize: 16 }}>
-            Login
-          </Text>
-        )}
-      </TouchableOpacity>
-
-      <TouchableOpacity
-        onPress={() => router.push('/signup')}
-        style={{ marginTop: 18, alignItems: 'center' }}
-      >
-        <Text style={{ color: '#2563eb', fontWeight: '600' }}>
-          Don’t have an account? Signup
+        <Text style={{ color: 'white', fontWeight: '700', fontSize: 16 }}>
+          {loading ? 'Logging in...' : 'Login'}
         </Text>
       </TouchableOpacity>
-    </View>
+
+      {/* ✅ Signup only for PATIENT */}
+      {selectedRole === 'patient' && (
+        <TouchableOpacity
+          onPress={() => router.push('/signup')}
+          style={{ marginTop: 18, alignItems: 'center' }}
+        >
+          <Text style={{ color: '#2563eb', fontWeight: '600' }}>
+            Don’t have an account? Signup
+          </Text>
+        </TouchableOpacity>
+      )}
+    </KeyboardAvoidingView>
   );
 }
